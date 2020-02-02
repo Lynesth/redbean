@@ -83,7 +83,7 @@ interface QueryWriter
 	 *
 	 * @return string
 	 */
-	private function parseJoin( $type, $sql );
+	public function parseJoin( $type, $sql );
 
 	/**
 	 * Writes an SQL Snippet for a JOIN, returns the
