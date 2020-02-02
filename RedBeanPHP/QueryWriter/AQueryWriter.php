@@ -902,6 +902,43 @@ abstract class AQueryWriter
 
 		return $id;
 	}
+	
+	/**
+	 * @see QueryWriter::parseJoin
+	 */
+	public function parseJoin( $type, $sql )
+	{
+		$sql = ' ' . $sql;
+		if ( strpos( $sql, '@joined.' ) === FALSE ) {
+			return $sql;
+		}
+
+		$joinSql = '';
+		$joins = array();
+		$oldParts = $parts = explode( '@joined.', $sql );
+		array_shift( $parts );
+		foreach($parts as $part) {
+			$explosion = explode( '.', $part );
+			$joinInfo  = reset( $explosion );
+			//Dont join more than once..
+			if ( !isset( $joins[$joinInfo] ) ) {
+				$joins[ $joinInfo ] = TRUE;
+				if ( !preg_match( "#JOIN\s+`?{$joinInfo}#", $sql ) ) {
+					$joinSql .= $this->writeJoin( $type, $joinInfo, 'LEFT' );
+				}
+			}
+		}
+
+		$sql = implode( '', $oldParts );
+		if ( strpos( $sql, ' WHERE ') === FALSE ) {
+			$sql = "{$joinSql} WHERE {$sql}";
+		} else {
+			$sqlParts = explode( ' WHERE ', $sql, 2 );
+			$sql = "{$sqlParts[0]} {$joinSql} WHERE {$sqlParts[1]}";
+		}
+		
+		return $sql;
+	}
 
 	/**
 	 * @see QueryWriter::writeJoin
