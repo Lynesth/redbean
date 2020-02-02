@@ -328,52 +328,6 @@ class OODBBean implements\IteratorAggregate,\ArrayAccess,\Countable,Jsonable
 	}
 
 	/**
-	 * Parses the join in the with-snippet.
-	 * For instance:
-	 *
-	 * <code>
-	 * $author
-	 * 	->withCondition(' @joined.detail.title LIKE ? ')
-	 *  ->ownBookList;
-	 * </code>
-	 *
-	 * will automatically join 'detail' on book to
-	 * access the title field.
-	 *
-	 * @note this feature requires Narrow Field Mode and Join Feature
-	 * to be both activated (default).
-	 *
-	 * @param string $type the source type for the join
-	 *
-	 * @return string
-	 */
-	private function parseJoin( $type )
-	{
-		if ( strpos($this->withSql, '@joined.' ) === FALSE ) {
-			return '';
-		}
-
-		$joinSql = ' ';
-		$joins = array();
-		$writer   = $this->beanHelper->getToolBox()->getWriter();
-		$oldParts = $parts = explode( '@joined.', $this->withSql );
-		array_shift( $parts );
-		foreach($parts as $part) {
-			$explosion = explode( '.', $part );
-			$joinInfo  = reset( $explosion );
-			//Dont join more than once..
-			if ( !isset( $joins[$joinInfo] ) ) {
-				$joins[ $joinInfo ] = TRUE;
-				$joinSql  .= $writer->writeJoin( $type, $joinInfo, 'LEFT' );
-			}
-		}
-		$this->withSql = implode( '', $oldParts );
-		$joinSql      .= ' WHERE ';
-
-		return $joinSql;
-	}
-
-	/**
 	 * Accesses the shared list of a bean.
 	 * To access beans that have been associated with the current bean
 	 * using a many-to-many relationship use sharedXList where
@@ -457,7 +411,7 @@ class OODBBean implements\IteratorAggregate,\ArrayAccess,\Countable,Jsonable
 		$beans = array();
 		if ( $this->getID() ) {
 			reset( $this->withParams );
-			$joinSql = $this->parseJoin( $type );
+			$joinSql = $this->beanHelper->getToolbox()->getWriter()->parseJoin( $type, $this->withSql );
 			$firstKey = count( $this->withParams ) > 0
 				? key( $this->withParams )
 				: 0;
@@ -2143,24 +2097,26 @@ class OODBBean implements\IteratorAggregate,\ArrayAccess,\Countable,Jsonable
 		$count = 0;
 		if ( $this->getID() ) {
 			reset( $this->withParams );
-			$joinSql = $this->parseJoin( $type );
+			$writer = $this->beanHelper->getToolbox()->getWriter();
+			$redbean = $this->beanHelper->getToolbox()->getRedBean();
+			$joinSql = $writer->parseJoin( $type, $this->withSql );
 			$firstKey = count( $this->withParams ) > 0
 				? key( $this->withParams )
 				: 0;
 			if ( is_int( $firstKey ) ) {
 				$bindings = array_merge( array( $this->getID() ), $this->withParams );
 				if ( !self::$useFluidCount ) {
-					$count = $this->beanHelper->getToolbox()->getWriter()->queryRecordCount( $type, array(), "{$joinSql} $myFieldLink = ? " . $this->withSql, $bindings );
+					$count = $writer->queryRecordCount( $type, array(), "{$joinSql} $myFieldLink = ? " . $this->withSql, $bindings );
 				} else {
-					$count = $this->beanHelper->getToolbox()->getRedBean()->count( $type, "{$joinSql} $myFieldLink = ? " . $this->withSql, $bindings );
+					$count = $redbean->count( $type, "{$joinSql} $myFieldLink = ? " . $this->withSql, $bindings );
 				}
 			} else {
 				$bindings           = $this->withParams;
 				$bindings[':slot0'] = $this->getID();
 				if ( !self::$useFluidCount ) {
-					$count = $this->beanHelper->getToolbox()->getWriter()->queryRecordCount( $type, array(), "{$joinSql} $myFieldLink = :slot0 " . $this->withSql, $bindings );
+					$count = $writer->queryRecordCount( $type, array(), "{$joinSql} $myFieldLink = :slot0 " . $this->withSql, $bindings );
 				} else {
-					$count = $this->beanHelper->getToolbox()->getRedBean()->count( $type, "{$joinSql} $myFieldLink = :slot0 " . $this->withSql, $bindings );
+					$count = $redbean->count( $type, "{$joinSql} $myFieldLink = :slot0 " . $this->withSql, $bindings );
 				}
 			}
 		}
