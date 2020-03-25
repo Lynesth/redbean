@@ -124,6 +124,35 @@ class OODB extends Observable
 
 	/**
 	 * Constructor, requires a query writer.
+	 * Most of the time, you do not need to use this constructor,
+	 * since the facade takes care of constructing and wiring the
+	 * RedBeanPHP core objects. However if you would like to
+	 * assemble an OODB instance yourself, this is how it works:
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $database = new RPDO( $dsn, $user, $pass );
+	 * $adapter = new DBAdapter( $database );
+	 * $writer = new PostgresWriter( $adapter );
+	 * $oodb = new OODB( $writer, FALSE );
+	 * $bean = $oodb->dispense( 'bean' );
+	 * $bean->name = 'coffeeBean';
+	 * $id = $oodb->store( $bean );
+	 * $bean = $oodb->load( 'bean', $id );
+	 * </code>
+	 *
+	 * The example above creates the 3 RedBeanPHP core objects:
+	 * the Adapter, the Query Writer and the OODB instance and
+	 * wires them together. The example also demonstrates some of
+	 * the methods that can be used with OODB, as you see, they
+	 * closely resemble their facade counterparts.
+	 *
+	 * The wiring process: create an RPDO instance using your database
+	 * connection parameters. Create a database adapter from the RPDO
+	 * object and pass that to the constructor of the writer. Next,
+	 * create an OODB instance from the writer. Now you have an OODB
+	 * object.
 	 *
 	 * @param QueryWriter   $writer writer
 	 * @param array|boolean $frozen mode of operation: TRUE (frozen), FALSE (default, fluid) or ARRAY (chilled)
@@ -311,7 +340,7 @@ class OODB extends Observable
 	 * @param string $sql      SQL to be used in query
 	 * @param array  $bindings a list of values to bind to query parameters
 	 *
-	 * @return array
+	 * @return BeanCollection
 	 */
 	public function findCollection(  $type, $sql = NULL, $bindings = array() )
 	{
@@ -511,19 +540,31 @@ class OODB extends Observable
 	}
 
 	/**
+	 * Clears all function bindings.
+	 *
+	 * @return void
+	 */
+	public function clearAllFuncBindings()
+	{
+		self::$sqlFilters = array();
+		AQueryWriter::setSQLFilters( self::$sqlFilters, FALSE );
+	}
+
+	/**
 	 * Binds an SQL function to a column.
 	 * This method can be used to setup a decode/encode scheme or
 	 * perform UUID insertion. This method is especially useful for handling
 	 * MySQL spatial columns, because they need to be processed first using
 	 * the asText/GeomFromText functions.
 	 *
-	 * @param string $mode     mode to set function for, i.e. read or write
-	 * @param string $field    field (table.column) to bind SQL function to
-	 * @param string $function SQL function to bind to field
+	 * @param string  $mode       mode to set function for, i.e. read or write
+	 * @param string  $field      field (table.column) to bind SQL function to
+	 * @param string  $function   SQL function to bind to field
+	 * @param boolean $isTemplate TRUE if $function is an SQL string, FALSE for just a function name
 	 *
 	 * @return void
 	 */
-	public function bindFunc( $mode, $field, $function )
+	public function bindFunc( $mode, $field, $function, $isTemplate = FALSE )
 	{
 		list( $type, $property ) = explode( '.', $field );
 		$mode = ($mode === 'write') ? QueryWriter::C_SQLFILTER_WRITE : QueryWriter::C_SQLFILTER_READ;
@@ -535,12 +576,21 @@ class OODB extends Observable
 			unset( self::$sqlFilters[$mode][$type][$property] );
 		} else {
 			if ($mode === QueryWriter::C_SQLFILTER_WRITE) {
-				self::$sqlFilters[$mode][$type][$property] = $function.'(?)';
+				if ($isTemplate) {
+					$code = sprintf( $function, '?' );
+				} else {
+					$code = "{$function}(?)";
+				}
+				self::$sqlFilters[$mode][$type][$property] = $code;
 			} else {
-				self::$sqlFilters[$mode][$type][$property] = $function."($field)";
+				if ($isTemplate) {
+					$code = sprintf( $function, $field );
+				} else {
+					$code = "{$function}({$field})";
+				}
+				self::$sqlFilters[$mode][$type][$property] = $code;
 			}
 		}
-
 		AQueryWriter::setSQLFilters( self::$sqlFilters, ( !$this->isFrozen ) );
 	}
 }

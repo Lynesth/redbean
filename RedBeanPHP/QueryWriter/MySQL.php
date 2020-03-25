@@ -36,6 +36,7 @@ class MySQL extends AQueryWriter implements QueryWriter
 	const C_DATATYPE_TEXT32           = 7;
 	const C_DATATYPE_SPECIAL_DATE     = 80;
 	const C_DATATYPE_SPECIAL_DATETIME = 81;
+	const C_DATATYPE_SPECIAL_TIME     = 83;  //MySQL time column (only manual)
 	const C_DATATYPE_SPECIAL_POINT    = 90;
 	const C_DATATYPE_SPECIAL_LINESTRING = 91;
 	const C_DATATYPE_SPECIAL_POLYGON    = 92;
@@ -97,6 +98,35 @@ class MySQL extends AQueryWriter implements QueryWriter
 
 	/**
 	 * Constructor
+	 * Most of the time, you do not need to use this constructor,
+	 * since the facade takes care of constructing and wiring the
+	 * RedBeanPHP core objects. However if you would like to
+	 * assemble an OODB instance yourself, this is how it works:
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $database = new RPDO( $dsn, $user, $pass );
+	 * $adapter = new DBAdapter( $database );
+	 * $writer = new PostgresWriter( $adapter );
+	 * $oodb = new OODB( $writer, FALSE );
+	 * $bean = $oodb->dispense( 'bean' );
+	 * $bean->name = 'coffeeBean';
+	 * $id = $oodb->store( $bean );
+	 * $bean = $oodb->load( 'bean', $id );
+	 * </code>
+	 *
+	 * The example above creates the 3 RedBeanPHP core objects:
+	 * the Adapter, the Query Writer and the OODB instance and
+	 * wires them together. The example also demonstrates some of
+	 * the methods that can be used with OODB, as you see, they
+	 * closely resemble their facade counterparts.
+	 *
+	 * The wiring process: create an RPDO instance using your database
+	 * connection parameters. Create a database adapter from the RPDO
+	 * object and pass that to the constructor of the writer. Next,
+	 * create an OODB instance from the writer. Now you have an OODB
+	 * object.
 	 *
 	 * @param Adapter $adapter Database Adapter
 	 */
@@ -112,6 +142,7 @@ class MySQL extends AQueryWriter implements QueryWriter
 			MySQL::C_DATATYPE_TEXT32           => ' LONGTEXT ',
 			MySQL::C_DATATYPE_SPECIAL_DATE     => ' DATE ',
 			MySQL::C_DATATYPE_SPECIAL_DATETIME => ' DATETIME ',
+			MySQL::C_DATATYPE_SPECIAL_TIME     => ' TIME ',
 			MySQL::C_DATATYPE_SPECIAL_POINT    => ' POINT ',
 			MySQL::C_DATATYPE_SPECIAL_LINESTRING => ' LINESTRING ',
 			MySQL::C_DATATYPE_SPECIAL_POLYGON => ' POLYGON ',
@@ -159,7 +190,7 @@ class MySQL extends AQueryWriter implements QueryWriter
 		$charset_collate = $this->adapter->getDatabase()->getMysqlEncoding( TRUE );
 		$charset = $charset_collate['charset'];
 		$collate = $charset_collate['collate'];
-		
+
 		$sql   = "CREATE TABLE $table (id INT( 11 ) UNSIGNED NOT NULL AUTO_INCREMENT, PRIMARY KEY ( id )) ENGINE = InnoDB DEFAULT CHARSET={$charset} COLLATE={$collate} ";
 
 		$this->adapter->exec( $sql );
@@ -342,7 +373,7 @@ class MySQL extends AQueryWriter implements QueryWriter
 		} catch ( SQLException $e ) {
 			// Failure of fk-constraints is not a problem
 		}
-		return true;
+		return TRUE;
 	}
 
 	/**
@@ -360,7 +391,7 @@ class MySQL extends AQueryWriter implements QueryWriter
 			$driverCode = $extraDriverDetails[1];
 
 			if ( $driverCode == '1205' && in_array( QueryWriter::C_SQLSTATE_LOCK_TIMEOUT, $list ) ) {
-				return true;
+				return TRUE;
 			}
 		}
 
@@ -372,18 +403,12 @@ class MySQL extends AQueryWriter implements QueryWriter
 	 */
 	public function wipeAll()
 	{
+		if (AQueryWriter::$noNuke) throw new \Exception('The nuke() command has been disabled using noNuke() or R::feature(novice/...).');
 		$this->adapter->exec( 'SET FOREIGN_KEY_CHECKS = 0;' );
 
 		foreach ( $this->getTables() as $t ) {
-			try {
-				$this->adapter->exec( "DROP TABLE IF EXISTS `$t`" );
-			} catch ( SQLException $e ) {
-			}
-
-			try {
-				$this->adapter->exec( "DROP VIEW IF EXISTS `$t`" );
-			} catch ( SQLException $e ) {
-			}
+			try { $this->adapter->exec( "DROP TABLE IF EXISTS `$t`" ); } catch ( SQLException $e ) { ; }
+			try { $this->adapter->exec( "DROP VIEW IF EXISTS `$t`" ); } catch ( SQLException $e ) { ; }
 		}
 
 		$this->adapter->exec( 'SET FOREIGN_KEY_CHECKS = 1;' );

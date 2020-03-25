@@ -65,6 +65,28 @@ interface QueryWriter
 	const C_GLUE_AND   = 2;
 
 	/**
+	 * Parses an sql string to create joins if needed.
+	 *
+	 * For instance with $type = 'book' and $sql = ' @joined.author.name LIKE ? OR @joined.detail.title LIKE ? '
+	 * parseJoin will return the following SQL:
+	 * ' LEFT JOIN `author` ON `author`.id = `book`.author_id
+	 *   LEFT JOIN `detail` ON `detail`.id = `book`.detail_id
+	 *   WHERE author.name LIKE ? OR detail.title LIKE ? '
+	 *
+	 * @note this feature requires Narrow Field Mode to be activated (default).
+	 *
+	 * @note A default implementation is available in AQueryWriter
+	 * unless a database uses very different SQL this should suffice.
+	 *
+	 * @param string         $type the source type for the join
+	 * @param string         $sql  the sql string to be parsed
+	 * @param string|boolean $overrideLinkType override link field (for trees)
+	 *
+	 * @return string
+	 */
+	public function parseJoin( $type, $sql, $overrideLinkType = FALSE );
+
+	/**
 	 * Writes an SQL Snippet for a JOIN, returns the
 	 * SQL snippet string.
 	 *
@@ -73,11 +95,12 @@ interface QueryWriter
 	 *
 	 * @param string $type       source type
 	 * @param string $targetType target type (type to join)
-	 * @param string $joinType   type of join (possible: 'LEFT', 'RIGHT' or 'INNER').
+	 * @param string $joinType   type of join (possible: 'LEFT', 'RIGHT' or 'INNER')
+	 * @param string|boolean $overrideLinkType override link field (for trees)
 	 *
 	 * @return string $joinSQLSnippet
 	 */
-	public function writeJoin( $type, $targetType, $joinType );
+	public function writeJoin( $type, $targetType, $leftRight, $joinType, $overrideLinkType = FALSE );
 
 	/**
 	 * Glues an SQL snippet to the beginning of a WHERE clause.
@@ -314,6 +337,35 @@ interface QueryWriter
 	public function queryTagged( $type, $tagList, $all = FALSE, $addSql = '', $bindings = array() );
 
 	/**
+	 * Like queryTagged but only counts.
+	 *
+	 * @param string  $type     the bean type you want to query
+	 * @param array   $tagList  an array of strings, each string containing a tag title
+	 * @param boolean $all      if TRUE only return records that have been associated with ALL the tags in the list
+	 * @param string  $addSql   addition SQL snippet, for pagination
+	 * @param array   $bindings parameter bindings for additional SQL snippet
+	 *
+	 * @return integer
+	 */
+	public function queryCountTagged( $type, $tagList, $all = FALSE, $addSql = '', $bindings = array() );
+
+	/**
+	 * Returns all parent rows or child rows of a specified row.
+	 * Given a type specifier and a primary key id, this method returns either all child rows
+	 * as defined by having <type>_id = id or all parent rows as defined per id = <type>_id
+	 * taking into account an optional SQL snippet along with parameters.
+	 *
+	 * @param string  $type     the bean type you want to query rows for
+	 * @param integer $id       id of the reference row
+	 * @param boolean $up       TRUE to query parent rows, FALSE to query child rows
+	 * @param string  $addSql   optional SQL snippet to embed in the query
+	 * @param array   $bindings parameter bindings for additional SQL snippet
+	 *
+	 * @return array
+	 */
+	public function queryRecursiveCommonTableExpression( $type, $id, $up = TRUE, $addSql = NULL, $bindings = array() );
+
+	/**
 	 * This method should update (or insert a record), it takes
 	 * a table name, a list of update values ( $field => $value ) and an
 	 * primary key ID (optional). If no primary key ID is provided, an
@@ -414,7 +466,7 @@ interface QueryWriter
 	 *
 	 * @return void
 	 */
-	public function addFK( $type, $targetType, $property, $targetProperty, $isDep = false );
+	public function addFK( $type, $targetType, $property, $targetProperty, $isDep = FALSE );
 
 	/**
 	 * This method will add an index to a type and field with name
@@ -490,20 +542,4 @@ interface QueryWriter
 	 */
 	public function getAssocTable( $types );
 
-	/**
-	 * Given a bean type and a property, this method
-	 * tries to infer the fetch type using the foreign key
-	 * definitions in the database.
-	 * For instance: project, student -> person.
-	 * If no fetchType can be inferred, this method will return NULL.
-	 *
-	 * @note QueryWriters do not have to implement this method,
-	 * it's optional. A default version is available in AQueryWriter.
-	 *
-	 * @param $type     the source type to fetch a target type for
-	 * @param $property the property to fetch the type of
-	 *
-	 * @return string|NULL
-	 */
-	public function inferFetchType( $type, $property );
 }

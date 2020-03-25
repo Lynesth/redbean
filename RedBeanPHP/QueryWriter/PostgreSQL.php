@@ -32,6 +32,8 @@ class PostgreSQL extends AQueryWriter implements QueryWriter
 	const C_DATATYPE_TEXT             = 3;
 	const C_DATATYPE_SPECIAL_DATE     = 80;
 	const C_DATATYPE_SPECIAL_DATETIME = 81;
+	const C_DATATYPE_SPECIAL_TIME     = 82; //TIME (no zone) only manual
+	const C_DATATYPE_SPECIAL_TIMEZ    = 83; //TIME (plus zone) only manual
 	const C_DATATYPE_SPECIAL_POINT    = 90;
 	const C_DATATYPE_SPECIAL_LSEG     = 91;
 	const C_DATATYPE_SPECIAL_CIRCLE   = 92;
@@ -123,6 +125,35 @@ class PostgreSQL extends AQueryWriter implements QueryWriter
 
 	/**
 	 * Constructor
+	 * Most of the time, you do not need to use this constructor,
+	 * since the facade takes care of constructing and wiring the
+	 * RedBeanPHP core objects. However if you would like to
+	 * assemble an OODB instance yourself, this is how it works:
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $database = new RPDO( $dsn, $user, $pass );
+	 * $adapter = new DBAdapter( $database );
+	 * $writer = new PostgresWriter( $adapter );
+	 * $oodb = new OODB( $writer, FALSE );
+	 * $bean = $oodb->dispense( 'bean' );
+	 * $bean->name = 'coffeeBean';
+	 * $id = $oodb->store( $bean );
+	 * $bean = $oodb->load( 'bean', $id );
+	 * </code>
+	 *
+	 * The example above creates the 3 RedBeanPHP core objects:
+	 * the Adapter, the Query Writer and the OODB instance and
+	 * wires them together. The example also demonstrates some of
+	 * the methods that can be used with OODB, as you see, they
+	 * closely resemble their facade counterparts.
+	 *
+	 * The wiring process: create an RPDO instance using your database
+	 * connection parameters. Create a database adapter from the RPDO
+	 * object and pass that to the constructor of the writer. Next,
+	 * create an OODB instance from the writer. Now you have an OODB
+	 * object.
 	 *
 	 * @param Adapter $adapter Database Adapter
 	 */
@@ -133,6 +164,8 @@ class PostgreSQL extends AQueryWriter implements QueryWriter
 			self::C_DATATYPE_DOUBLE           => ' double precision ',
 			self::C_DATATYPE_TEXT             => ' text ',
 			self::C_DATATYPE_SPECIAL_DATE     => ' date ',
+			self::C_DATATYPE_SPECIAL_TIME     => ' time ',
+			self::C_DATATYPE_SPECIAL_TIMEZ    => ' time with time zone ',
 			self::C_DATATYPE_SPECIAL_DATETIME => ' timestamp without time zone ',
 			self::C_DATATYPE_SPECIAL_POINT    => ' point ',
 			self::C_DATATYPE_SPECIAL_LSEG     => ' lseg ',
@@ -373,6 +406,7 @@ class PostgreSQL extends AQueryWriter implements QueryWriter
 	 */
 	public function wipeAll()
 	{
+		if (AQueryWriter::$noNuke) throw new \Exception('The nuke() command has been disabled using noNuke() or R::feature(novice/...).');
 		$this->adapter->exec( 'SET CONSTRAINTS ALL DEFERRED' );
 
 		foreach ( $this->getTables() as $t ) {

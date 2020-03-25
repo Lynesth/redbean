@@ -22,12 +22,14 @@ use RedBeanPHP\Util\QuickExport as QuickExport;
 use RedBeanPHP\Util\MatchUp as MatchUp;
 use RedBeanPHP\Util\Look as Look;
 use RedBeanPHP\Util\Diff as Diff;
+use RedBeanPHP\Util\Tree as Tree;
+use RedBeanPHP\Util\Feature;
 
 /**
  * RedBean Facade
  *
  * Version Information
- * RedBean Version @version 5
+ * RedBean Version @version 5.5
  *
  * This class hides the object landscape of
  * RedBeanPHP behind a single letter class providing
@@ -47,7 +49,7 @@ class Facade
 	/**
 	 * RedBeanPHP version constant.
 	 */
-	const C_REDBEANPHP_VERSION = '5';
+	const C_REDBEANPHP_VERSION = '5.5';
 
 	/**
 	 * @var ToolBox
@@ -95,6 +97,11 @@ class Facade
 	private static $finder;
 
 	/**
+	 * @var Tree
+	 */
+	private static $tree;
+
+	/**
 	 * @var Logger
 	 */
 	private static $logger;
@@ -108,6 +115,16 @@ class Facade
 	 * @var string
 	 */
 	private static $exportCaseStyle = 'default';
+
+	/**
+	 * @var flag allows transactions through facade in fluid mode
+	 */
+	private static $allowFluidTransactions = FALSE;
+
+	/**
+	 * @var flag allows to unfreeze if needed with store(all)
+	 */
+	private static $allowHybridMode = FALSE;
 
 	/**
 	 * Not in use (backward compatibility SQLHelper)
@@ -160,6 +177,22 @@ class Facade
 	}
 
 	/**
+	 * Sets allow hybrid mode flag. In Hybrid mode (default off),
+	 * store/storeAll take an extra argument to switch to fluid
+	 * mode in case of an exception. You can use this to speed up
+	 * fluid mode. This method returns the previous value of the
+	 * flag.
+	 *
+	 * @param boolean $hybrid
+	 */
+	public static function setAllowHybridMode( $hybrid )
+	{
+		$old = self::$allowHybridMode;
+		self::$allowHybridMode = $hybrid;
+		return $old;
+	}
+
+	/**
 	 * Returns the RedBeanPHP version string.
 	 * The RedBeanPHP version string always has the same format "X.Y"
 	 * where X is the major version number and Y is the minor version number.
@@ -173,9 +206,11 @@ class Facade
 	}
 
 	/**
-	 * Tests the connection.
+	 * Tests the database connection.
 	 * Returns TRUE if connection has been established and
-	 * FALSE otherwise.
+	 * FALSE otherwise. Suppresses any warnings that may
+	 * occur during the testing process and catches all
+	 * exceptions that might be thrown during the test.
 	 *
 	 * @return boolean
 	 */
@@ -192,8 +227,29 @@ class Facade
 
 	/**
 	 * Kickstarts redbean for you. This method should be called before you start using
-	 * RedBean. The Setup() method can be called without any arguments, in this case it will
+	 * RedBeanPHP. The Setup() method can be called without any arguments, in this case it will
 	 * try to create a SQLite database in /tmp called red.db (this only works on UNIX-like systems).
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::setup( 'mysql:host=localhost;dbname=mydatabase', 'dba', 'dbapassword' );
+	 * </code>
+	 *
+	 * You can replace 'mysql:' with the name of the database you want to use.
+	 * Possible values are:
+	 *
+	 * - pgsql  (PostgreSQL database)
+	 * - sqlite (SQLite database)
+	 * - mysql  (MySQL database)
+	 * - mysql  (also for Maria database)
+	 * - sqlsrv (MS SQL Server - community supported experimental driver)
+	 * - CUBRID (CUBRID driver - basic support provided by Plugin)
+	 *
+	 * Note that setup() will not immediately establish a connection to the database.
+	 * Instead, it will prepare the connection and connect 'lazily', i.e. the moment
+	 * a connection is really required, for instance when attempting to load
+	 * a bean.
 	 *
 	 * @param string  $dsn      Database connection string
 	 * @param string  $username Username for database
@@ -202,29 +258,81 @@ class Facade
 	 *
 	 * @return ToolBox
 	 */
-	public static function setup( $dsn = NULL, $username = NULL, $password = NULL, $frozen = FALSE )
+	public static function setup( $dsn = NULL, $username = NULL, $password = NULL, $frozen = FALSE, $partialBeans = FALSE )
 	{
 		if ( is_null( $dsn ) ) {
 			$dsn = 'sqlite:/' . sys_get_temp_dir() . '/red.db';
 		}
 
-		self::addDatabase( 'default', $dsn, $username, $password, $frozen );
+		self::addDatabase( 'default', $dsn, $username, $password, $frozen, $partialBeans );
 		self::selectDatabase( 'default' );
 
 		return self::$toolbox;
 	}
 
 	/**
-	 * Toggles Narrow Field Mode.
-	 * See documentation in QueryWriter.
+	 * Toggles 'Narrow Field Mode'.
+	 * In Narrow Field mode the queryRecord method will
+	 * narrow its selection field to
 	 *
-	 * @param boolean $mode TRUE = Narrow Field Mode
+	 * <code>
+	 * SELECT {table}.*
+	 * </code>
+	 *
+	 * instead of
+	 *
+	 * <code>
+	 * SELECT *
+	 * </code>
+	 *
+	 * This is a better way of querying because it allows
+	 * more flexibility (for instance joins). However if you need
+	 * the wide selector for backward compatibility; use this method
+	 * to turn OFF Narrow Field Mode by passing FALSE.
+	 * Default is TRUE.
+	 *
+	 * @param boolean $narrowField TRUE = Narrow Field FALSE = Wide Field
 	 *
 	 * @return void
 	 */
 	public static function setNarrowFieldMode( $mode )
 	{
 		AQueryWriter::setNarrowFieldMode( $mode );
+	}
+
+	/**
+	 * Toggles fluid transactions. By default fluid transactions
+	 * are not active. Starting, committing or rolling back a transaction
+	 * through the facade in fluid mode will have no effect. If you wish
+	 * to replace this standard portable behavor with behavior depending
+	 * on how the used database platform handles fluid (DDL) transactions
+	 * set this flag to TRUE.
+	 *
+	 * @param boolean $mode allow fluid transaction mode
+	 *
+	 * @return void
+	 */
+	public static function setAllowFluidTransactions( $mode )
+	{
+		self::$allowFluidTransactions = $mode;
+	}
+
+	/**
+	 * Toggles support for IS-NULL-conditions.
+	 * If IS-NULL-conditions are enabled condition arrays
+	 * for functions including findLike() are treated so that
+	 * 'field' => NULL will be interpreted as field IS NULL
+	 * instead of being skipped. Returns the previous
+	 * value of the flag.
+	 *
+	 * @param boolean $flag TRUE or FALSE
+	 *
+	 * @return boolean
+	 */
+	public static function useISNULLConditions( $mode )
+	{
+		self::getWriter()->flushCache(); /* otherwise same queries might fail (see Unit test XNull) */
+		return AQueryWriter::useISNULLConditions( $mode );
 	}
 
 	/**
@@ -284,7 +392,7 @@ class Facade
 	 *
 	 * @return void
 	 */
-	public static function addDatabase( $key, $dsn, $user = NULL, $pass = NULL, $frozen = FALSE )
+	public static function addDatabase( $key, $dsn, $user = NULL, $pass = NULL, $frozen = FALSE, $partialBeans = FALSE )
 	{
 		if ( isset( self::$toolboxes[$key] ) ) {
 			throw new RedException( 'A database has already been specified for this key.' );
@@ -317,7 +425,26 @@ class Facade
 		$writer      = new $writerClass( $adapter );
 		$redbean     = new OODB( $writer, $frozen );
 
+		if ( $partialBeans ) {
+			$redbean->getCurrentRepository()->usePartialBeans( $partialBeans );
+		}
+
 		self::$toolboxes[$key] = new ToolBox( $redbean, $adapter, $writer );
+	}
+
+	/**
+	 * Sets PDO attributes for MySQL SSL connection.
+	 *
+	 * @param string $key  path client key i.e. '/etc/mysql/ssl/client-key.pem'
+	 * @param string $cert path client cert i.e. '/etc/mysql/ssl/client-cert.pem'
+	 * @param string $ca   path certifying agent certificate '/etc/mysql/ssl/ca-cert.pem'
+	 * @param string $id   apply to toolbox (default = 'default')
+	 */
+	public static function useMysqlSSL( $key, $cert, $ca, $id = 'default' ) {
+		$pdo = self::$toolboxes[$id]->getDatabaseAdapter()->getDatabase()->getPDO();
+		$pdo->setAttribute( \PDO::MYSQL_ATTR_SSL_KEY,  $key);
+		$pdo->setAttribute( \PDO::MYSQL_ATTR_SSL_CERT,  $cert);
+		$pdo->setAttribute( \PDO::MYSQL_ATTR_SSL_CA,  $ca);
 	}
 
 	/**
@@ -348,9 +475,9 @@ class Facade
 	 *
 	 * @return boolean
 	 */
-	public static function selectDatabase( $key )
+	public static function selectDatabase( $key, $force = FALSE )
 	{
-		if ( self::$currentDB === $key ) {
+		if ( self::$currentDB === $key && !$force ) {
 			return FALSE;
 		}
 
@@ -459,13 +586,45 @@ class Facade
 	 * The return value is an integer if possible. If it is not possible to
 	 * represent the value as an integer a string will be returned.
 	 *
-	 * @param OODBBean|SimpleModel $bean bean to store
+	 * Usage:
+	 *
+	 * <code>
+	 * $post = R::dispense('post');
+	 * $post->title = 'my post';
+	 * $id = R::store( $post );
+	 * $post = R::load( 'post', $id );
+	 * R::trash( $post );
+	 * </code>
+	 *
+	 * In the example above, we create a new bean of type 'post'.
+	 * We then set the title of the bean to 'my post' and we
+	 * store the bean. The store() method will return the primary
+	 * key ID $id assigned by the database. We can now use this
+	 * ID to load the bean from the database again and delete it.
+	 *
+	 * If the second parameter is set to TRUE and
+	 * Hybrid mode is allowed (default OFF for novice), then RedBeanPHP
+	 * will automatically temporarily switch to fluid mode to attempt to store the
+	 * bean in case of an SQLException.
+	 *
+	 * @param OODBBean|SimpleModel $bean             bean to store
+	 * @param boolean              $unfreezeIfNeeded retries in fluid mode in hybrid mode
 	 *
 	 * @return integer|string
 	 */
-	public static function store( $bean )
+	public static function store( $bean, $unfreezeIfNeeded = FALSE )
 	{
-		return self::$redbean->store( $bean );
+		$result = NULL;
+		try {
+			$result = self::$redbean->store( $bean );
+		} catch (SQLException $exception) {
+			$wasFrozen = self::$redbean->isFrozen();
+			if ( !self::$allowHybridMode || !$unfreezeIfNeeded ) throw $exception;
+			self::freeze( FALSE );
+			$result = self::$redbean->store( $bean );
+			self::freeze( $wasFrozen );
+		}
+		return $result;
 	}
 
 	/**
@@ -487,10 +646,16 @@ class Facade
 	/**
 	 * Loads multiple types of beans with the same ID.
 	 * This might look like a strange method, however it can be useful
-	 * for loading a one-to-one relation.
+	 * for loading a one-to-one relation. In a typical 1-1 relation,
+	 * you have two records sharing the same primary key.
+	 * RedBeanPHP has only limited support for 1-1 relations.
+	 * In general it is recommended to use 1-N for this.
 	 *
 	 * Usage:
+	 *
+	 * <code>
 	 * list( $author, $bio ) = R::loadMulti( 'author, bio', $id );
+	 * </code>
 	 *
 	 * @param string|array $types the set of types to load at once
 	 * @param mixed        $id    the common ID
@@ -519,6 +684,22 @@ class Facade
 	 * If the bean cannot be found in the database a new bean of
 	 * the specified type will be generated and returned.
 	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $post = R::dispense('post');
+	 * $post->title = 'my post';
+	 * $id = R::store( $post );
+	 * $post = R::load( 'post', $id );
+	 * R::trash( $post );
+	 * </code>
+	 *
+	 * In the example above, we create a new bean of type 'post'.
+	 * We then set the title of the bean to 'my post' and we
+	 * store the bean. The store() method will return the primary
+	 * key ID $id assigned by the database. We can now use this
+	 * ID to load the bean from the database again and delete it.
+	 *
 	 * @param string  $type    type of bean you want to load
 	 * @param integer $id      ID of the bean you want to load
 	 * @param string  $snippet string to use after select  (optional)
@@ -535,6 +716,16 @@ class Facade
 	/**
 	 * Same as load, but selects the bean for update, thus locking the bean.
 	 * This equals an SQL query like 'SELECT ... FROM ... FOR UPDATE'.
+	 * Use this method if you want to load a bean you intend to UPDATE.
+	 * This method should be used to 'LOCK a bean'.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $bean = R::loadForUpdate( 'bean', $id );
+	 * ...update...
+	 * R::store( $bean );
+	 * </code>
 	 *
 	 * @param string  $type    type of bean you want to load
 	 * @param integer $id      ID of the bean you want to load
@@ -547,6 +738,35 @@ class Facade
 	}
 
 	/**
+	 * Same as find(), but selects the beans for update, thus locking the beans.
+	 * This equals an SQL query like 'SELECT ... FROM ... FOR UPDATE'.
+	 * Use this method if you want to load a bean you intend to UPDATE.
+	 * This method should be used to 'LOCK a bean'.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $bean = R::findForUpdate(
+	 *    'bean',
+	 *    ' title LIKE ? ',
+	 *    array('title')
+	 * );
+	 * ...update...
+	 * R::store( $bean );
+	 * </code>
+	 *
+	 * @param string $type     the type of bean you are looking for
+	 * @param string $sql      SQL query to find the desired bean, starting right after WHERE clause
+	 * @param array  $bindings array of values to be bound to parameters in query
+	 *
+	 * @return OODBBean
+	 */
+	public static function findForUpdate( $type, $sql, $bindings = array() )
+	{
+		return self::find( $type, $sql, $bindings, AQueryWriter::C_SELECT_SNIPPET_FOR_UPDATE );
+	}
+
+	/**
 	 * Removes a bean from the database.
 	 * This function will remove the specified OODBBean
 	 * Bean Object from the database.
@@ -554,6 +774,22 @@ class Facade
 	 * This facade method also accepts a type-id combination,
 	 * in the latter case this method will attempt to load the specified bean
 	 * and THEN trash it.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $post = R::dispense('post');
+	 * $post->title = 'my post';
+	 * $id = R::store( $post );
+	 * $post = R::load( 'post', $id );
+	 * R::trash( $post );
+	 * </code>
+	 *
+	 * In the example above, we create a new bean of type 'post'.
+	 * We then set the title of the bean to 'my post' and we
+	 * store the bean. The store() method will return the primary
+	 * key ID $id assigned by the database. We can now use this
+	 * ID to load the bean from the database again and delete it.
 	 *
 	 * @param string|OODBBean|SimpleModel $beanOrType bean you want to remove from database
 	 * @param integer                     $id         ID if the bean to trash (optional, type-id variant only)
@@ -568,7 +804,43 @@ class Facade
 
 	/**
 	 * Dispenses a new RedBean OODB Bean for use with
-	 * the rest of the methods.
+	 * the rest of the methods. RedBeanPHP thinks in beans, the bean is the
+	 * primary way to interact with RedBeanPHP and the database managed by
+	 * RedBeanPHP. To load, store and delete data from the database using RedBeanPHP
+	 * you exchange these RedBeanPHP OODB Beans. The only exception to this rule
+	 * are the raw query methods like R::getCell() or R::exec() and so on.
+	 * The dispense method is the 'preferred way' to create a new bean.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $book = R::dispense( 'book' );
+	 * $book->title = 'My Book';
+	 * R::store( $book );
+	 * </code>
+	 *
+	 * This method can also be used to create an entire bean graph at once.
+	 * Given an array with keys specifying the property names of the beans
+	 * and a special _type key to indicate the type of bean, one can
+	 * make the Dispense Helper generate an entire hierarchy of beans, including
+	 * lists. To make dispense() generate a list, simply add a key like:
+	 * ownXList or sharedXList where X is the type of beans it contains and
+	 * a set its value to an array filled with arrays representing the beans.
+	 * Note that, although the type may have been hinted at in the list name,
+	 * you still have to specify a _type key for every bean array in the list.
+	 * Note that, if you specify an array to generate a bean graph, the number
+	 * parameter will be ignored.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 *  $book = R::dispense( [
+	 *   '_type' => 'book',
+	 *   'title'  => 'Gifted Programmers',
+	 *   'author' => [ '_type' => 'author', 'name' => 'Xavier' ],
+	 *   'ownPageList' => [ ['_type'=>'page', 'text' => '...'] ]
+	 * ] );
+	 * </code>
 	 *
 	 * @param string|array $typeOrBeanArray   type or bean array to import
 	 * @param integer      $num               number of beans to dispense
@@ -648,30 +920,29 @@ class Facade
 	}
 
 	/**
-	 * Finds a bean using a type and a where clause (SQL).
+	 * Finds beans using a type and optional SQL statement.
 	 * As with most Query tools in RedBean you can provide values to
 	 * be inserted in the SQL statement by populating the value
 	 * array parameter; you can either use the question mark notation
 	 * or the slot-notation (:keyname).
 	 *
+	 * Your SQL does not have to start with a WHERE-clause condition.
+	 *
 	 * @param string $type     the type of bean you are looking for
 	 * @param string $sql      SQL query to find the desired bean, starting right after WHERE clause
 	 * @param array  $bindings array of values to be bound to parameters in query
+	 * @param string $snippet  SQL snippet to include in query (for example: FOR UPDATE)
 	 *
 	 * @return array
 	 */
-	public static function find( $type, $sql = NULL, $bindings = array() )
+	public static function find( $type, $sql = NULL, $bindings = array(), $snippet = NULL )
 	{
+		if ( $snippet !== NULL ) self::$writer->setSQLSelectSnippet( $snippet );
 		return self::$finder->find( $type, $sql, $bindings );
 	}
 
 	/**
-	 * The findAll() method differs from the find() method in that it does
-	 * not assume a WHERE-clause, so this is valid:
-	 *
-	 * R::findAll('person',' ORDER BY name DESC ');
-	 *
-	 * Your SQL does not have to start with a valid WHERE-clause condition.
+	 * Alias for find().
 	 *
 	 * @param string $type     the type of bean you are looking for
 	 * @param string $sql      SQL query to find the desired bean, starting right after WHERE clause
@@ -711,7 +982,7 @@ class Facade
 	 * @param string $sql      SQL query to find the desired bean, starting right after WHERE clause
 	 * @param array  $bindings array of values to be bound to parameters in query
 	 *
-	 * @return OODBBean
+	 * @return OODBBean|NULL
 	 */
 	public static function findOne( $type, $sql = NULL, $bindings = array() )
 	{
@@ -719,9 +990,16 @@ class Facade
 	}
 
 	/**
+	 * @deprecated
+	 *
 	 * Like find() but returns the last bean of the result array.
 	 * Opposite of Finder::findLast().
 	 * If no beans are found, this method will return NULL.
+	 *
+	 * Please do not use this function, it is horribly ineffective.
+	 * Instead use a reversed ORDER BY clause and a LIMIT 1 with R::findOne().
+	 * This function should never be used and only remains for
+	 * the sake of backward compatibility.
 	 *
 	 * @see Finder::find
 	 *
@@ -729,7 +1007,7 @@ class Facade
 	 * @param string $sql      SQL query to find the desired bean, starting right after WHERE clause
 	 * @param array  $bindings values array of values to be bound to parameters in query
 	 *
-	 * @return OODBBean
+	 * @return OODBBean|NULL
 	 */
 	public static function findLast( $type, $sql = NULL, $bindings = array() )
 	{
@@ -908,6 +1186,23 @@ class Facade
 	public static function getCell( $sql, $bindings = array() )
 	{
 		return self::query( 'getCell', $sql, $bindings );
+	}
+
+	/**
+	 * Convenience function to fire an SQL query using the RedBeanPHP
+	 * database adapter. This method allows you to directly query the
+	 * database without having to obtain an database adapter instance first.
+	 * Executes the specified SQL query together with the specified
+	 * parameter bindings and returns a PDOCursor instance.
+	 *
+	 * @param string $sql      SQL query to execute
+	 * @param array  $bindings a list of values to be bound to query parameters
+	 *
+	 * @return RedBeanPHP\Cursor\PDOCursor
+	 */
+	public static function getCursor( $sql, $bindings = array() )
+	{
+		return self::query( 'getCursor', $sql, $bindings );
 	}
 
 	/**
@@ -1148,17 +1443,17 @@ class Facade
 	 * @param array  $row       one row from the database
 	 * @param string $metamask  metamask (see convertToBeans)
 	 *
-	 * @return RedBeanPHP\OODBBean
+	 * @return OODBBean|NULL
 	 */
 	public static function convertToBean( $type, $row, $metamask = NULL )
 	{
+		if ( !count( $row ) ) return NULL;
 		$beans = self::$redbean->convertToBeans( $type, array( $row ), $metamask );
 		$bean  = reset( $beans );
 		return $bean;
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
 	 * Tests whether a bean has been associated with one ore more
 	 * of the listed tags. If the third parameter is TRUE this method
 	 * will return TRUE only if all tags that have been specified are indeed
@@ -1167,9 +1462,23 @@ class Facade
 	 * method will return TRUE if one of the tags matches, FALSE if none
 	 * match.
 	 *
-	 * @param  OODBBean $bean bean to check for tags
-	 * @param  array    $tags list of tags
-	 * @param  boolean  $all  whether they must all match or just some
+	 * Tag list can be either an array with tag names or a comma separated list
+	 * of tag names.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::hasTag( $blog, 'horror,movie', TRUE );
+	 * </code>
+	 *
+	 * The example above returns TRUE if the $blog bean has been tagged
+	 * as BOTH horror and movie. If the post has only been tagged as 'movie'
+	 * or 'horror' this operation will return FALSE because the third parameter
+	 * has been set to TRUE.
+	 *
+	 * @param  OODBBean     $bean bean to check for tags
+	 * @param  array|string $tags list of tags
+	 * @param  boolean      $all  whether they must all match or just some
 	 *
 	 * @return boolean
 	 */
@@ -1179,9 +1488,20 @@ class Facade
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
 	 * Removes all specified tags from the bean. The tags specified in
 	 * the second parameter will no longer be associated with the bean.
+	 *
+	 * Tag list can be either an array with tag names or a comma separated list
+	 * of tag names.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::untag( $blog, 'smart,interesting' );
+	 * </code>
+	 *
+	 * In the example above, the $blog bean will no longer
+	 * be associated with the tags 'smart' and 'interesting'.
 	 *
 	 * @param  OODBBean $bean    tagged bean
 	 * @param  array    $tagList list of tags (names)
@@ -1194,13 +1514,23 @@ class Facade
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
 	 * Tags a bean or returns tags associated with a bean.
 	 * If $tagList is NULL or omitted this method will return a
 	 * comma separated list of tags associated with the bean provided.
 	 * If $tagList is a comma separated list (string) of tags all tags will
 	 * be associated with the bean.
 	 * You may also pass an array instead of a string.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::tag( $meal, "TexMex,Mexican" );
+	 * $tags = R::tag( $meal );
+	 * </code>
+	 *
+	 * The first line in the example above will tag the $meal
+	 * as 'TexMex' and 'Mexican Cuisine'. The second line will
+	 * retrieve all tags attached to the meal object.
 	 *
 	 * @param OODBBean $bean    bean to tag
 	 * @param mixed    $tagList tags to attach to the specified bean
@@ -1213,11 +1543,19 @@ class Facade
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
 	 * Adds tags to a bean.
 	 * If $tagList is a comma separated list of tags all tags will
 	 * be associated with the bean.
 	 * You may also pass an array instead of a string.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::addTags( $blog, ["halloween"] );
+	 * </code>
+	 *
+	 * The example adds the tag 'halloween' to the $blog
+	 * bean.
 	 *
 	 * @param OODBBean $bean    bean to tag
 	 * @param array    $tagList list of tags to add to bean
@@ -1230,13 +1568,31 @@ class Facade
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
-	 * Returns all beans that have been tagged with one of the tags given.
+	 * Returns all beans that have been tagged with one or more
+	 * of the specified tags.
 	 *
-	 * @param string $beanType type of bean you are looking for
-	 * @param array  $tagList  list of tags to match
-	 * @param string $sql      additional SQL query snippet
-	 * @param array  $bindings a list of values to bind to the query parameters
+	 * Tag list can be either an array with tag names or a comma separated list
+	 * of tag names.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $watchList = R::tagged(
+	 *   'movie',
+	 *   'horror,gothic',
+	 *   ' ORDER BY movie.title DESC LIMIT ?',
+	 *   [ 10 ]
+	 * );
+	 * </code>
+	 *
+	 * The example uses R::tagged() to find all movies that have been
+	 * tagged as 'horror' or 'gothic', order them by title and limit
+	 * the number of movies to be returned to 10.
+	 *
+	 * @param string       $beanType type of bean you are looking for
+	 * @param array|string $tagList  list of tags to match
+	 * @param string       $sql      additional SQL (use only for pagination)
+	 * @param array        $bindings bindings
 	 *
 	 * @return array
 	 */
@@ -1246,19 +1602,71 @@ class Facade
 	}
 
 	/**
-	 * Part of RedBeanPHP Tagging API.
 	 * Returns all beans that have been tagged with ALL of the tags given.
+	 * This method works the same as R::tagged() except that this method only returns
+	 * beans that have been tagged with all the specified labels.
 	 *
-	 * @param string $beanType type of bean you are looking for
-	 * @param array  $tagList  list of tags to match
-	 * @param string $sql      additional SQL query snippet
-	 * @param array  $bindings a list of values to bind to the query parameters
+	 * Tag list can be either an array with tag names or a comma separated list
+	 * of tag names.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $watchList = R::taggedAll(
+	 *    'movie',
+	 *    [ 'gothic', 'short' ],
+	 *    ' ORDER BY movie.id DESC LIMIT ? ',
+	 *    [ 4 ]
+	 * );
+	 * </code>
+	 *
+	 * The example above returns at most 4 movies (due to the LIMIT clause in the SQL
+	 * Query Snippet) that have been tagged as BOTH 'short' AND 'gothic'.
+	 *
+	 * @param string       $beanType type of bean you are looking for
+	 * @param array|string $tagList  list of tags to match
+	 * @param string       $sql      additional sql snippet
+	 * @param array        $bindings bindings
 	 *
 	 * @return array
 	 */
 	public static function taggedAll( $beanType, $tagList, $sql = '', $bindings = array() )
 	{
 		return self::$tagManager->taggedAll( $beanType, $tagList, $sql, $bindings );
+	}
+
+	/**
+	 * Same as taggedAll() but counts beans only (does not return beans).
+	 *
+	 * @see R::taggedAll
+	 *
+	 * @param string       $beanType type of bean you are looking for
+	 * @param array|string $tagList  list of tags to match
+	 * @param string       $sql      additional sql snippet
+	 * @param array        $bindings bindings
+	 *
+	 * @return integer
+	 */
+	public static function countTaggedAll( $beanType, $tagList, $sql = '', $bindings = array() )
+	{
+		return self::$tagManager->countTaggedAll( $beanType, $tagList, $sql, $bindings );
+	}
+
+	/**
+	 * Same as tagged() but counts beans only (does not return beans).
+	 *
+	 * @see R::tagged
+	 *
+	 * @param string       $beanType type of bean you are looking for
+	 * @param array|string $tagList  list of tags to match
+	 * @param string       $sql      additional sql snippet
+	 * @param array        $bindings bindings
+	 *
+	 * @return integer
+	 */
+	public static function countTagged( $beanType, $tagList, $sql = '', $bindings = array() )
+	{
+		return self::$tagManager->countTagged( $beanType, $tagList, $sql, $bindings );
 	}
 
 	/**
@@ -1307,11 +1715,14 @@ class Facade
 		self::$redbean            = self::$toolbox->getRedBean();
 		self::$finder             = new Finder( self::$toolbox );
 		self::$associationManager = new AssociationManager( self::$toolbox );
+		self::$tree               = new Tree( self::$toolbox );
 		self::$redbean->setAssociationManager( self::$associationManager );
 		self::$labelMaker         = new LabelMaker( self::$toolbox );
 		$helper                   = new SimpleModelHelper();
 		$helper->attachEventListeners( self::$redbean );
-		self::$redbean->setBeanHelper( new SimpleFacadeBeanHelper );
+		if (self::$redbean->getBeanHelper() == NULL) {
+			self::$redbean->setBeanHelper( new SimpleFacadeBeanHelper );
+		}
 		self::$duplicationManager = new DuplicationManager( self::$toolbox );
 		self::$tagManager         = new TagManager( self::$toolbox );
 		return $oldTools;
@@ -1321,11 +1732,39 @@ class Facade
 	 * Facade Convience method for adapter transaction system.
 	 * Begins a transaction.
 	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::begin();
+	 * try {
+	 *  $bean1 = R::dispense( 'bean' );
+	 *  R::store( $bean1 );
+	 *  $bean2 = R::dispense( 'bean' );
+	 *  R::store( $bean2 );
+	 *  R::commit();
+	 * } catch( \Exception $e ) {
+	 *  R::rollback();
+	 * }
+	 * </code>
+	 *
+	 * The example above illustrates how transactions in RedBeanPHP are used.
+	 * In this example 2 beans are stored or nothing is stored at all.
+	 * It's not possible for this piece of code to store only half of the beans.
+	 * If an exception occurs, the transaction gets rolled back and the database
+	 * will be left 'untouched'.
+	 *
+	 * In fluid mode transactions will be ignored and all queries will
+	 * be executed as-is because database schema changes will automatically
+	 * trigger the transaction system to commit everything in some database
+	 * systems. If you use a database that can handle DDL changes you might wish
+	 * to use setAllowFluidTransactions(TRUE). If you do this, the behavior of
+	 * this function in fluid mode will depend on the database platform used.
+	 *
 	 * @return bool
 	 */
 	public static function begin()
 	{
-		if ( !self::$redbean->isFrozen() ) return FALSE;
+		if ( !self::$allowFluidTransactions && !self::$redbean->isFrozen() ) return FALSE;
 		self::$adapter->startTransaction();
 		return TRUE;
 	}
@@ -1334,11 +1773,39 @@ class Facade
 	 * Facade Convience method for adapter transaction system.
 	 * Commits a transaction.
 	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::begin();
+	 * try {
+	 *  $bean1 = R::dispense( 'bean' );
+	 *  R::store( $bean1 );
+	 *  $bean2 = R::dispense( 'bean' );
+	 *  R::store( $bean2 );
+	 *  R::commit();
+	 * } catch( \Exception $e ) {
+	 *  R::rollback();
+	 * }
+	 * </code>
+	 *
+	 * The example above illustrates how transactions in RedBeanPHP are used.
+	 * In this example 2 beans are stored or nothing is stored at all.
+	 * It's not possible for this piece of code to store only half of the beans.
+	 * If an exception occurs, the transaction gets rolled back and the database
+	 * will be left 'untouched'.
+	 *
+	 * In fluid mode transactions will be ignored and all queries will
+	 * be executed as-is because database schema changes will automatically
+	 * trigger the transaction system to commit everything in some database
+	 * systems. If you use a database that can handle DDL changes you might wish
+	 * to use setAllowFluidTransactions(TRUE). If you do this, the behavior of
+	 * this function in fluid mode will depend on the database platform used.
+	 *
 	 * @return bool
 	 */
 	public static function commit()
 	{
-		if ( !self::$redbean->isFrozen() ) return FALSE;
+		if ( !self::$allowFluidTransactions && !self::$redbean->isFrozen() ) return FALSE;
 		self::$adapter->commit();
 		return TRUE;
 	}
@@ -1347,11 +1814,39 @@ class Facade
 	 * Facade Convience method for adapter transaction system.
 	 * Rolls back a transaction.
 	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::begin();
+	 * try {
+	 *  $bean1 = R::dispense( 'bean' );
+	 *  R::store( $bean1 );
+	 *  $bean2 = R::dispense( 'bean' );
+	 *  R::store( $bean2 );
+	 *  R::commit();
+	 * } catch( \Exception $e ) {
+	 *  R::rollback();
+	 * }
+	 * </code>
+	 *
+	 * The example above illustrates how transactions in RedBeanPHP are used.
+	 * In this example 2 beans are stored or nothing is stored at all.
+	 * It's not possible for this piece of code to store only half of the beans.
+	 * If an exception occurs, the transaction gets rolled back and the database
+	 * will be left 'untouched'.
+	 *
+	 * In fluid mode transactions will be ignored and all queries will
+	 * be executed as-is because database schema changes will automatically
+	 * trigger the transaction system to commit everything in some database
+	 * systems. If you use a database that can handle DDL changes you might wish
+	 * to use setAllowFluidTransactions(TRUE). If you do this, the behavior of
+	 * this function in fluid mode will depend on the database platform used.
+	 *
 	 * @return bool
 	 */
 	public static function rollback()
 	{
-		if ( !self::$redbean->isFrozen() ) return FALSE;
+		if ( !self::$allowFluidTransactions && !self::$redbean->isFrozen() ) return FALSE;
 		self::$adapter->rollback();
 		return TRUE;
 	}
@@ -1373,8 +1868,29 @@ class Facade
 
 	/**
 	 * Generates question mark slots for an array of values.
+	 * Given an array and an optional template string this method
+	 * will produce string containing parameter slots for use in
+	 * an SQL query string.
 	 *
-	 * @param array  $array array to generate question mark slots for
+	 * Usage:
+	 *
+	 * <code>
+	 * R::genSlots( array( 'a', 'b' ) );
+	 * </code>
+	 *
+	 * The statement in the example will produce the string:
+	 * '?,?'.
+	 *
+	 * Another example, using a template string:
+	 *
+	 * <code>
+	 * R::genSlots( array('a', 'b'), ' IN( %s ) ' );
+	 * </code>
+	 *
+	 * The statement in the example will produce the string:
+	 * ' IN( ?,? ) '.
+	 *
+	 * @param array  $array    array to generate question mark slots for
 	 * @param string $template template to use
 	 *
 	 * @return string
@@ -1387,7 +1903,15 @@ class Facade
 	/**
 	 * Flattens a multi dimensional bindings array for use with genSlots().
 	 *
-	 * @param array $array array to flatten
+	 * Usage:
+	 *
+	 * <code>
+	 * R::flat( array( 'a', array( 'b' ), 'c' ) );
+	 * </code>
+	 *
+	 * produces an array like: [ 'a', 'b', 'c' ]
+	 *
+	 * @param array $array  array to flatten
 	 * @param array $result result array parameter (for recursion)
 	 *
 	 * @return array
@@ -1408,8 +1932,29 @@ class Facade
 	 */
 	public static function nuke()
 	{
-		if ( !self::$redbean->isFrozen() ) {
-			self::$writer->wipeAll();
+		return self::wipeAll( TRUE );
+	}
+
+	/**
+	 * Truncates or drops all database tables/views.
+	 * Empties the database. If the deleteTables flag is set to TRUE
+	 * this function will also remove the database structures.
+	 * The latter only works in fluid mode.
+	 *
+	 * @param boolean $alsoDeleteTables TRUE to clear entire database.
+	 *
+	 * @return void
+	 */
+	public static function wipeAll( $alsoDeleteTables = FALSE )
+	{
+		if ( $alsoDeleteTables ) {
+			if ( !self::$redbean->isFrozen() ) {
+				self::$writer->wipeAll();
+			}
+		} else {
+			foreach ( self::$writer->getTables() as $table ) {
+				self::wipe( $table );
+			}
 		}
 	}
 
@@ -1419,15 +1964,21 @@ class Facade
 	 * function.
 	 * A loop saver.
 	 *
-	 * @param array $beans list of beans to be stored
+	 * If the second parameter is set to TRUE and
+	 * Hybrid mode is allowed (default OFF for novice), then RedBeanPHP
+	 * will automatically temporarily switch to fluid mode to attempt to store the
+	 * bean in case of an SQLException.
+	 *
+	 * @param array   $beans            list of beans to be stored
+	 * @param boolean $unfreezeIfNeeded retries in fluid mode in hybrid mode
 	 *
 	 * @return array
 	 */
-	public static function storeAll( $beans )
+	public static function storeAll( $beans, $unfreezeIfNeeded = FALSE )
 	{
 		$ids = array();
 		foreach ( $beans as $bean ) {
-			$ids[] = self::store( $bean );
+			$ids[] = self::store( $bean, $unfreezeIfNeeded );
 		}
 		return $ids;
 	}
@@ -1443,9 +1994,65 @@ class Facade
 	 */
 	public static function trashAll( $beans )
 	{
+		$numberOfDeletion = 0;
 		foreach ( $beans as $bean ) {
-			self::trash( $bean );
+			$numberOfDeletion += self::trash( $bean );
 		}
+		return $numberOfDeletion;
+	}
+
+	/**
+	 * Short hand function to trash a series of beans using
+	 * only IDs. This function combines trashAll and batch loading
+	 * in one call. Note that while this function accepts just
+	 * bean IDs, the beans will still be loaded first. This is because
+	 * the function still respects all the FUSE hooks that may have beeb
+	 * associated with the domain logic associated with these beans.
+	 * If you really want to delete just records from the database use
+	 * a simple DELETE-FROM SQL query instead.
+	 *
+	 * @param string type  $type the bean type you wish to trash
+	 * @param string array $ids  list of bean IDs
+	 *
+	 * @return void
+	 */
+	public static function trashBatch( $type, $ids )
+	{
+		self::trashAll( self::batch( $type, $ids ) );
+	}
+
+	/**
+	 * Short hand function to find and trash beans.
+	 * This function combines trashAll and find.
+	 * Given a bean type, a query snippet and optionally some parameter
+	 * bindings, this function will search for the beans described in the
+	 * query and its parameters and then feed them to the trashAll function
+	 * to be trashed.
+	 *
+	 * Note that while this function accepts just
+	 * a bean type and query snippet, the beans will still be loaded first. This is because
+	 * the function still respects all the FUSE hooks that may have been
+	 * associated with the domain logic associated with these beans.
+	 * If you really want to delete just records from the database use
+	 * a simple DELETE-FROM SQL query instead.
+	 *
+	 * Returns the number of beans deleted.
+	 *
+	 * @param string $type       bean type to look for in database
+	 * @param string $sqlSnippet an SQL query snippet
+	 * @param array  $bindings   SQL parameter bindings
+	 *
+	 * @return int
+	 */
+	public static function hunt( $type, $sqlSnippet = NULL, $bindings = array() )
+	{
+		$numberOfTrashedBeans = 0;
+		$beans = self::findCollection( $type, $sqlSnippet, $bindings );
+		while( $bean = $beans->next() ) {
+			self::trash( $bean );
+			$numberOfTrashedBeans++;
+		}
+		return $numberOfTrashedBeans;
 	}
 
 	/**
@@ -1537,6 +2144,17 @@ class Facade
 
 	/**
 	 * Closes the database connection.
+	 * While database connections are closed automatically at the end of the PHP script,
+	 * closing database connections is generally recommended to improve performance.
+	 * Closing a database connection will immediately return the resources to PHP.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::setup( ... );
+	 * ... do stuff ...
+	 * R::close();
+	 * </code>
 	 *
 	 * @return void
 	 */
@@ -1580,8 +2198,9 @@ class Facade
 	}
 
 	/**
-	 * Optional accessor for neat code.
 	 * Sets the database adapter you want to use.
+	 * The database adapter manages the connection to the database
+	 * and abstracts away database driver specific interfaces.
 	 *
 	 * @param Adapter $adapter Database Adapter for facade to use
 	 *
@@ -1593,8 +2212,10 @@ class Facade
 	}
 
 	/**
-	 * Optional accessor for neat code.
-	 * Sets the database adapter you want to use.
+	 * Sets the Query Writer you want to use.
+	 * The Query Writer writes and executes database queries using
+	 * the database adapter. It turns RedBeanPHP 'commands' into
+	 * database 'statements'.
 	 *
 	 * @param QueryWriter $writer Query Writer instance for facade to use
 	 *
@@ -1606,8 +2227,10 @@ class Facade
 	}
 
 	/**
-	 * Optional accessor for neat code.
-	 * Sets the database adapter you want to use.
+	 * Sets the OODB you want to use.
+	 * The RedBeanPHP Object oriented database is the main RedBeanPHP
+	 * interface that allows you to store and retrieve RedBeanPHP
+	 * objects (i.e. beans).
 	 *
 	 * @param OODB $redbean Object Database for facade to use
 	 */
@@ -1781,10 +2404,22 @@ class Facade
 	}
 
 	/**
-	 * Simple but effective debug function.
+	 * Dumps bean data to array.
 	 * Given a one or more beans this method will
 	 * return an array containing first part of the string
 	 * representation of each item in the array.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * echo R::dump( $bean );
+	 * </code>
+	 *
+	 * The example shows how to echo the result of a simple
+	 * dump. This will print the string representation of the
+	 * specified bean to the screen, limiting the output per bean
+	 * to 35 characters to improve readability. Nested beans will
+	 * also be dumped.
 	 *
 	 * @param OODBBean|array $data either a bean or an array of beans
 	 *
@@ -1815,18 +2450,19 @@ class Facade
 	 * @param string $mode     mode for function: i.e. read or write
 	 * @param string $field    field (table.column) to bind function to
 	 * @param string $function SQL function to bind to specified column
+	 * @param boolean $isTemplate TRUE if $function is an SQL string, FALSE for just a function name
 	 *
 	 * @return void
 	 */
-	public static function bindFunc( $mode, $field, $function )
+	public static function bindFunc( $mode, $field, $function, $isTemplate = FALSE )
 	{
-		self::$redbean->bindFunc( $mode, $field, $function );
+		self::$redbean->bindFunc( $mode, $field, $function, $isTemplate );
 	}
 
 	/**
 	 * Sets global aliases.
 	 * Registers a batch of aliases in one go. This works the same as
-	 * fetchAs and setAutoResolve but explicitly. For instance if you register
+	 * fetchAs but explicitly. For instance if you register
 	 * the alias 'cover' for 'page' a property containing a reference to a
 	 * page bean called 'cover' will correctly return the page bean and not
 	 * a (non-existant) cover bean.
@@ -1851,9 +2487,7 @@ class Facade
 	 * cover => page
 	 *
 	 * From that point on, every bean reference to a cover
-	 * will return a 'page' bean. Note that with autoResolve this
-	 * feature along with fetchAs() is no longer very important, although
-	 * relying on explicit aliases can be a bit faster.
+	 * will return a 'page' bean.
 	 *
 	 * @param array $list list of global aliases to use
 	 *
@@ -1877,9 +2511,9 @@ class Facade
 	 *
 	 * @return OODBBean
 	 */
-	public static function findOrCreate( $type, $like = array() )
+	public static function findOrCreate( $type, $like = array(), $sql = '' )
 	{
-		return self::$finder->findOrCreate( $type, $like );
+		return self::$finder->findOrCreate( $type, $like, $sql = '' );
 	}
 
 	/**
@@ -1892,18 +2526,37 @@ class Facade
 	 * @param string $type type of bean to search for
 	 * @param array  $like optional criteria set describing the bean to search for
 	 * @param string $sql  optional additional SQL for sorting
+	 * @param array  $bindings bindings
 	 *
 	 * @return array
 	 */
-	public static function findLike( $type, $like = array(), $sql = '' )
+	public static function findLike( $type, $like = array(), $sql = '', $bindings = array() )
 	{
-		return self::$finder->findLike( $type, $like, $sql );
+		return self::$finder->findLike( $type, $like, $sql, $bindings );
 	}
 
 	/**
 	 * Starts logging queries.
 	 * Use this method to start logging SQL queries being
-	 * executed by the adapter.
+	 * executed by the adapter. Logging queries will not
+	 * print them on the screen. Use R::getLogs() to
+	 * retrieve the logs.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::startLogging();
+	 * R::store( R::dispense( 'book' ) );
+	 * R::find('book', 'id > ?',[0]);
+	 * $logs = R::getLogs();
+	 * $count = count( $logs );
+	 * print_r( $logs );
+	 * R::stopLogging();
+	 * </code>
+	 *
+	 * In the example above we start a logging session during
+	 * which we store an empty bean of type book. To inspect the
+	 * logs we invoke R::getLogs() after stopping the logging.
 	 *
 	 * @note you cannot use R::debug and R::startLogging
 	 * at the same time because R::debug is essentially a
@@ -1917,7 +2570,34 @@ class Facade
 	}
 
 	/**
-	 * Stops logging, comfortable method to stop logging of queries.
+	 * Stops logging and flushes the logs,
+	 * convient method to stop logging of queries.
+	 * Use this method to stop logging SQL queries being
+	 * executed by the adapter. Logging queries will not
+	 * print them on the screen. Use R::getLogs() to
+	 * retrieve the logs.
+	 *
+	 * <code>
+	 * R::startLogging();
+	 * R::store( R::dispense( 'book' ) );
+	 * R::find('book', 'id > ?',[0]);
+	 * $logs = R::getLogs();
+	 * $count = count( $logs );
+	 * print_r( $logs );
+	 * R::stopLogging();
+	 * </code>
+	 *
+	 * In the example above we start a logging session during
+	 * which we store an empty bean of type book. To inspect the
+	 * logs we invoke R::getLogs() after stopping the logging.
+	 *
+	 * @note you cannot use R::debug and R::startLogging
+	 * at the same time because R::debug is essentially a
+	 * special kind of logging.
+	 *
+	 * @note by stopping the logging you also flush the logs.
+	 * Therefore, only stop logging AFTER you have obtained the
+	 * query logs using R::getLogs()
 	 *
 	 * @return void
 	 */
@@ -1929,6 +2609,43 @@ class Facade
 	/**
 	 * Returns the log entries written after the startLogging.
 	 *
+	 * Use this method to obtain the query logs gathered
+	 * by the logging mechanisms.
+	 * Logging queries will not
+	 * print them on the screen. Use R::getLogs() to
+	 * retrieve the logs.
+	 *
+	 * <code>
+	 * R::startLogging();
+	 * R::store( R::dispense( 'book' ) );
+	 * R::find('book', 'id > ?',[0]);
+	 * $logs = R::getLogs();
+	 * $count = count( $logs );
+	 * print_r( $logs );
+	 * R::stopLogging();
+	 * </code>
+	 *
+	 * In the example above we start a logging session during
+	 * which we store an empty bean of type book. To inspect the
+	 * logs we invoke R::getLogs() after stopping the logging.
+	 *
+	 * The logs may look like:
+	 *
+	 * [1] => SELECT `book`.*  FROM `book`  WHERE id > ?  -- keep-cache
+	 * [2] => array ( 0 => 0, )
+	 * [3] => resultset: 1 rows
+	 *
+	 * Basically, element in the array is a log entry.
+	 * Parameter bindings are  represented as nested arrays (see 2).
+	 *
+	 * @note you cannot use R::debug and R::startLogging
+	 * at the same time because R::debug is essentially a
+	 * special kind of logging.
+	 *
+	 * @note by stopping the logging you also flush the logs.
+	 * Therefore, only stop logging AFTER you have obtained the
+	 * query logs using R::getLogs()
+	 *
 	 * @return array
 	 */
 	public static function getLogs()
@@ -1937,9 +2654,20 @@ class Facade
 	}
 
 	/**
-	 * Resets the Query counter.
+	 * Resets the query counter.
+	 * The query counter can be used to monitor the number
+	 * of database queries that have
+	 * been processed according to the database driver. You can use this
+	 * to monitor the number of queries required to render a page.
 	 *
-	 * @return integer
+	 * Usage:
+	 *
+	 * <code>
+	 * R::resetQueryCount();
+	 * echo R::getQueryCount() . ' queries processed.';
+	 * </code>
+	 *
+	 * @return void
 	 */
 	public static function resetQueryCount()
 	{
@@ -1948,6 +2676,15 @@ class Facade
 
 	/**
 	 * Returns the number of SQL queries processed.
+	 * This method returns the number of database queries that have
+	 * been processed according to the database driver. You can use this
+	 * to monitor the number of queries required to render a page.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * echo R::getQueryCount() . ' queries processed.';
+	 * </code>
 	 *
 	 * @return integer
 	 */
@@ -1968,19 +2705,10 @@ class Facade
 	}
 
 	/**
-	 * Alias for setAutoResolve() method on OODBBean.
-	 * Enables or disables auto-resolving fetch types.
-	 * Auto-resolving aliased parent beans is convenient but can
-	 * be slower and can create infinite recursion if you
-	 * used aliases to break cyclic relations in your domain.
-	 *
-	 * @param boolean $automatic TRUE to enable automatic resolving aliased parents
-	 *
-	 * @return void
+	 * @deprecated
 	 */
 	public static function setAutoResolve( $automatic = TRUE )
 	{
-		OODBBean::setAutoResolve( (boolean) $automatic );
 	}
 
 	/**
@@ -2004,8 +2732,10 @@ class Facade
 
 	/**
 	 * Exposes the result of the specified SQL query as a CSV file.
+	 *
 	 * Usage:
 	 *
+	 * <code>
 	 * R::csv( 'SELECT
 	 *                 `name`,
 	 *                  population
@@ -2015,6 +2745,7 @@ class Facade
 	 *          array( 'city', 'population' ),
 	 *          '/tmp/cities.csv'
 	 * );
+	 * </code>
 	 *
 	 * The command above will select all cities in Denmark
 	 * and create a CSV with columns 'city' and 'population' and
@@ -2030,7 +2761,7 @@ class Facade
 	 *
 	 * @return void
 	 */
-	public static function csv( $sql = '', $bindings = array(), $columns = NULL, $path = '/tmp/redexport_%s.csv', $output = true )
+	public static function csv( $sql = '', $bindings = array(), $columns = NULL, $path = '/tmp/redexport_%s.csv', $output = TRUE )
 	{
 		$quickExport = new QuickExport( self::$toolbox );
 		$quickExport->csv( $sql, $bindings, $columns, $path, $output );
@@ -2054,6 +2785,9 @@ class Facade
 	 * there was a NOT-FOUND task list. If no bean was found AND there was also
 	 * no second task list, NULL will be returned.
 	 *
+	 * To obtain the bean, pass a variable as the sixth parameter.
+	 * The function will put the matching bean in the specified variable.
+	 *
 	 * @param string   $type         type of bean you're looking for
 	 * @param string   $sql          SQL snippet (starting at the WHERE clause, omit WHERE-keyword)
 	 * @param array    $bindings     array of parameter bindings for SQL snippet
@@ -2069,13 +2803,76 @@ class Facade
 	}
 
 	/**
+	 * @deprecated
+	 *
 	 * Returns an instance of the Look Helper class.
 	 * The instance will be configured with the current toolbox.
 	 *
+	 * In previous versions of RedBeanPHP you had to use:
+	 * R::getLook()->look() instead of R::look(). However to improve useability of the
+	 * library the look() function can now directly be invoked from the facade.
+	 *
+	 * For more details regarding the Look functionality, please consult R::look().
+	 * @see Facade::look
+	 * @see Look::look
+	 *
 	 * @return Look
 	 */
-	public static function getLook() {
+	public static function getLook()
+	{
 		return new Look( self::$toolbox );
+	}
+
+	/**
+	 * Takes an full SQL query with optional bindings, a series of keys, a template
+	 * and optionally a filter function and glue and assembles a view from all this.
+	 * This is the fastest way from SQL to view. Typically this function is used to
+	 * generate pulldown (select tag) menus with options queried from the database.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * $htmlPulldown = R::look(
+	 *   'SELECT * FROM color WHERE value != ? ORDER BY value ASC',
+	 *   [ 'g' ],
+	 *   [ 'value', 'name' ],
+	 *   '<option value="%s">%s</option>',
+	 *   'strtoupper',
+	 *   "\n"
+	 * );
+	 *</code>
+	 *
+	 * The example above creates an HTML fragment like this:
+	 *
+	 * <option value="B">BLUE</option>
+	 * <option value="R">RED</option>
+	 *
+	 * to pick a color from a palette. The HTML fragment gets constructed by
+	 * an SQL query that selects all colors that do not have value 'g' - this
+	 * excludes green. Next, the bean properties 'value' and 'name' are mapped to the
+	 * HTML template string, note that the order here is important. The mapping and
+	 * the HTML template string follow vsprintf-rules. All property values are then
+	 * passed through the specified filter function 'strtoupper' which in this case
+	 * is a native PHP function to convert strings to uppercase characters only.
+	 * Finally the resulting HTML fragment strings are glued together using a
+	 * newline character specified in the last parameter for readability.
+	 *
+	 * In previous versions of RedBeanPHP you had to use:
+	 * R::getLook()->look() instead of R::look(). However to improve useability of the
+	 * library the look() function can now directly be invoked from the facade.
+	 *
+	 * @param string   $sql      query to execute
+	 * @param array    $bindings parameters to bind to slots mentioned in query or an empty array
+	 * @param array    $keys     names in result collection to map to template
+	 * @param string   $template HTML template to fill with values associated with keys, use printf notation (i.e. %s)
+	 * @param callable $filter   function to pass values through (for translation for instance)
+	 * @param string   $glue     optional glue to use when joining resulting strings
+	 *
+	 * @return string
+	 */
+	public static function look( $sql, $bindings = array(), $keys = array( 'selected', 'id', 'name' ), $template = '<option %s value="%s">%s</option>', $filter = 'trim', $glue = '' )
+	{
+		return self::getLook()->look( $sql, $bindings, $keys, $template, $filter, $glue );
 	}
 
 	/**
@@ -2110,9 +2907,64 @@ class Facade
 	 *
 	 * @return array
 	 */
-	public static function diff( $bean, $other, $filters = array( 'created', 'modified' ), $pattern = '%s.%s.%s' ) {
+	public static function diff( $bean, $other, $filters = array( 'created', 'modified' ), $pattern = '%s.%s.%s' )
+	{
 		$diff = new Diff( self::$toolbox );
 		return $diff->diff( $bean, $other, $filters, $pattern );
+	}
+
+	/**
+	 * The gentleman's way to register a RedBeanPHP ToolBox instance
+	 * with the facade. Stores the toolbox in the static toolbox
+	 * registry of the facade class. This allows for a neat and
+	 * explicit way to register a toolbox.
+	 *
+	 * @param string  $key     key to store toolbox instance under
+	 * @param ToolBox $toolbox toolbox to register
+	 *
+	 * @return void
+	 */
+	public static function addToolBoxWithKey( $key, ToolBox $toolbox )
+	{
+		self::$toolboxes[$key] = $toolbox;
+	}
+
+	/**
+	 * The gentleman's way to remove a RedBeanPHP ToolBox instance
+	 * from the facade. Removes the toolbox identified by
+	 * the specified key in the static toolbox
+	 * registry of the facade class. This allows for a neat and
+	 * explicit way to remove a toolbox.
+	 * Returns TRUE if the specified toolbox was found and removed.
+	 * Returns FALSE otherwise.
+	 *
+	 * @param string  $key     identifier of the toolbox to remove
+	 *
+	 * @return boolean
+	 */
+	public static function removeToolBoxByKey( $key )
+	{
+		if ( !array_key_exists( $key, self::$toolboxes ) ) {
+			return FALSE;
+		}
+		unset( self::$toolboxes[$key] );
+		return TRUE;
+	}
+
+	/**
+	 * Returns the toolbox associated with the specified key.
+	 *
+	 * @param string  $key     key to store toolbox instance under
+	 * @param ToolBox $toolbox toolbox to register
+	 *
+	 * @return ToolBox|NULL
+	 */
+	public static function getToolBoxByKey( $key )
+	{
+		if ( !array_key_exists( $key, self::$toolboxes ) ) {
+			return NULL;
+		}
+		return self::$toolboxes[$key];
 	}
 
 	/**
@@ -2141,8 +2993,10 @@ class Facade
 	 *
 	 * So invoking this method is the same as:
 	 *
+	 * <code>
 	 * AQueryWriter::useJSONColumns( $flag );
 	 * OODBBean::convertArraysToJSON( $flag );
+	 * </code>
 	 *
 	 * Unlike the methods above, that return the previous state, this
 	 * method does not return anything (void).
@@ -2155,6 +3009,85 @@ class Facade
 	{
 		AQueryWriter::useJSONColumns( $flag );
 		OODBBean::convertArraysToJSON( $flag );
+	}
+
+	/**
+	 * @experimental
+	 *
+	 * Given a bean and an optional SQL snippet,
+	 * this method will return all child beans in a hierarchically structured
+	 * bean table.
+	 *
+	 * @note that not all database support this functionality. You'll need
+	 * at least MariaDB 10.2.2 or Postgres. This method does not include
+	 * a warning mechanism in case your database does not support this
+	 * functionality.
+	 *
+	 * @note that this functionality is considered 'experimental'.
+	 * It may still contain bugs.
+	 *
+	 * @param OODBBean $bean     bean to find children of
+	 * @param string   $sql      optional SQL snippet
+	 * @param array    $bindings SQL snippet parameter bindings
+	 */
+	public static function children( OODBBean $bean, $sql = NULL, $bindings = array() )
+	{
+		return self::$tree->children( $bean, $sql, $bindings );
+	}
+
+	/**
+	 * @experimental
+	 *
+	 * Given a bean and an optional SQL snippet,
+	 * this method will return all parent beans in a hierarchically structured
+	 * bean table.
+	 *
+	 * @note that not all database support this functionality. You'll need
+	 * at least MariaDB 10.2.2 or Postgres. This method does not include
+	 * a warning mechanism in case your database does not support this
+	 * functionality.
+	 *
+	 * @note that this functionality is considered 'experimental'.
+	 * It may still contain bugs.
+	 *
+	 * @param OODBBean $bean     bean to find parents of
+	 * @param string   $sql      optional SQL snippet
+	 * @param array    $bindings SQL snippet parameter bindings
+	 */
+	public static function parents( OODBBean $bean, $sql = NULL, $bindings = array() )
+	{
+		return self::$tree->parents( $bean, $sql, $bindings );
+	}
+
+	/**
+	 * Toggles support for nuke().
+	 * Can be used to turn off the nuke() feature for security reasons.
+	 * Returns the old flag value.
+	 *
+	 * @param boolean $flag TRUE or FALSE
+	 *
+	 * @return boolean
+	 */
+	public static function noNuke( $yesNo ) {
+		return AQueryWriter::forbidNuke( $yesNo );
+	}
+
+	/**
+	 * Selects the feature set you want as specified by
+	 * the label.
+	 *
+	 * Usage:
+	 *
+	 * <code>
+	 * R::useFeatureSet( 'novice/latest' );
+	 * </code>
+	 *
+	 * @param string $label label
+	 *
+	 * @return void
+	 */
+	public static function useFeatureSet( $label ) {
+		return Feature::feature($label);
 	}
 
 	/**
@@ -2182,8 +3115,8 @@ class Facade
 	 */
 	public static function ext( $pluginName, $callable )
 	{
-		if ( !ctype_alnum( $pluginName ) ) {
-			throw new RedException( 'Plugin name may only contain alphanumeric characters.' );
+		if ( !preg_match( '#^[a-zA-Z_][a-zA-Z0-9_]*$#', $pluginName ) ) {
+			throw new RedException( 'Plugin name may only contain alphanumeric characters and underscores and cannot start with a number.' );
 		}
 		self::$plugins[$pluginName] = $callable;
 	}
@@ -2199,10 +3132,10 @@ class Facade
 	 */
 	public static function __callStatic( $pluginName, $params )
 	{
-		if ( !ctype_alnum( $pluginName) ) {
-			throw new RedException( 'Plugin name may only contain alphanumeric characters.' );
-		}
 		if ( !isset( self::$plugins[$pluginName] ) ) {
+			if ( !preg_match( '#^[a-zA-Z_][a-zA-Z0-9_]*$#', $pluginName ) ) {
+				throw new RedException( 'Plugin name may only contain alphanumeric characters and underscores and cannot start with a number.' );
+			}
 			throw new RedException( 'Plugin \''.$pluginName.'\' does not exist, add this plugin using: R::ext(\''.$pluginName.'\')' );
 		}
 		return call_user_func_array( self::$plugins[$pluginName], $params );
